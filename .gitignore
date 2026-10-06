@@ -1,0 +1,16 @@
+.env
+.env.*
+!.env.example
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+data/*
+!data/.gitkeep
+*.db
+*.log
+_req_extract/
+_ls.txt
+.idea/
+.vscode/
