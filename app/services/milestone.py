@@ -36,7 +36,9 @@ def build_milestone(db) -> dict:
     connected = [
         row
         for row in accounts
-        if row.enabled and row.encrypted_refresh_token and row.status not in {"needs_login", "authenticating"}
+        if row.enabled
+        and (row.encrypted_refresh_token or row.encrypted_access_token)
+        and row.status not in {"needs_login", "authenticating"}
     ]
     ready_to_check = [
         row for row in connected if row.status in {"ready", "cooldown", "error"}
@@ -79,9 +81,9 @@ def build_milestone(db) -> dict:
             "label": "Configure your own Minecraft accounts without sending passwords",
             "done": bool(connected),
             "detail": (
-                f"{len(connected)} account(s) connected with encrypted Microsoft sessions."
+                f"{len(connected)} account(s) connected (device sign-in and/or encrypted bearer token)."
                 if connected
-                else "Connect an account on the Accounts page. Sign-in happens on Microsoft's site."
+                else "Connect an account on the Accounts page with Microsoft device sign-in or a Minecraft Services bearer token."
             ),
         },
         {

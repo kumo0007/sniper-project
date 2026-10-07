@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -49,9 +49,21 @@ def _sqlite_pragmas(dbapi_connection, _connection_record) -> None:
     cursor.close()
 
 
+def _migrate_sqlite(engine: Engine) -> None:
+    if not str(engine.url).startswith("sqlite"):
+        return
+    with engine.begin() as conn:
+        columns = {row[1] for row in conn.execute(text("PRAGMA table_info(accounts)")).fetchall()}
+        if "auth_method" not in columns:
+            conn.execute(text("ALTER TABLE accounts ADD COLUMN auth_method VARCHAR(32) DEFAULT 'device_code'"))
+        if "credential_hint" not in columns:
+            conn.execute(text("ALTER TABLE accounts ADD COLUMN credential_hint VARCHAR(64)"))
+
+
 def init_db() -> None:
     engine = get_engine()
     Base.metadata.create_all(engine)
+    _migrate_sqlite(engine)
     from app.services.settings_store import seed_settings
 
     with session_scope() as db:

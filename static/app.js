@@ -51,6 +51,27 @@ const STATUS_LABELS = {
 
 document.addEventListener("submit", onSubmit);
 document.addEventListener("click", onClick);
+document.addEventListener("change", onChange);
+
+function onChange(event) {
+  const select = event.target.closest("select[name='auth_method']");
+  if (select) syncAuthMethodFields();
+}
+
+function syncAuthMethodFields() {
+  const form = document.getElementById("account-form");
+  if (!form) return;
+  const method = form.auth_method?.value || "device_code";
+  const tokenField = document.getElementById("token-field");
+  const submit = document.getElementById("account-submit");
+  const input = form.querySelector("input[name='bearer_token']");
+  if (tokenField) tokenField.classList.toggle("hidden", method !== "bearer_token");
+  if (input) {
+    input.required = method === "bearer_token";
+    if (method !== "bearer_token") input.value = "";
+  }
+  if (submit) submit.textContent = method === "bearer_token" ? "Validate and save token" : "Connect Microsoft";
+}
 
 boot();
 
@@ -95,6 +116,7 @@ function paint() {
     root.innerHTML = shellHtml();
     renderedView = state.view;
     liveSignature = "";
+    syncAuthMethodFields();
   }
   updateChrome();
   const live = document.getElementById("live");
@@ -191,14 +213,23 @@ function viewIntro() {
     return `
       <section class="panel">
         <h2>Connect an account</h2>
-        <p class="help">You sign in at microsoft.com. This app stores an encrypted refresh token and never asks for the Minecraft password.</p>
-        <form class="form-grid" data-action="add-account" style="margin-top:14px">
+        <p class="help">Choose Microsoft device sign-in or paste a Minecraft Services bearer token from the official login_with_xbox flow. This app never asks for the Minecraft password. After you submit a token, only a short fingerprint is shown.</p>
+        <form class="stack" data-action="add-account" style="margin-top:14px" id="account-form">
           <label>Label
             <input name="label" maxlength="80" placeholder="Main, alt 2…" required>
           </label>
-          <div></div>
-          <div></div>
-          <button class="btn" type="submit">Connect Microsoft</button>
+          <label>Authentication method
+            <select name="auth_method" data-action="toggle-auth-method">
+              <option value="device_code">Microsoft device sign-in</option>
+              <option value="bearer_token">Minecraft Services bearer token</option>
+            </select>
+          </label>
+          <label class="token-field hidden" id="token-field">
+            Minecraft Services access token
+            <input name="bearer_token" type="password" autocomplete="off" spellcheck="false" placeholder="Paste Bearer access_token (JWT)">
+            <span class="help">Validated with GET /minecraft/profile before the account is marked Ready. Not shown again after submit.</span>
+          </label>
+          <button class="btn" type="submit" id="account-submit">Connect Microsoft</button>
         </form>
       </section>`;
   }
@@ -343,14 +374,16 @@ function accountsHtml(overview) {
       <td>
         <strong>${esc(account.label)}</strong>
         <div class="help">${esc(account.mc_name || "No Minecraft profile yet")}</div>
+        <div class="help">${esc(authMethodLabel(account.auth_method))} · ${account.credential_configured ? esc(account.credential_hint || "Configured") : "No credential stored"}</div>
         ${account.login ? loginBox(account) : ""}
+        ${account.auth_method === "bearer_token" ? replaceTokenBox(account) : ""}
       </td>
       <td>${pill(account.enabled ? account.status : "disabled", account.enabled ? labelStatus(account.status) : "Disabled")}</td>
       <td>${account.name_change_allowed == null ? "—" : account.name_change_allowed ? "Yes" : "No"}</td>
-      <td>${esc(account.status_detail || "")}<div class="help">${fmt(account.last_checked_at)}</div></td>
+      <td>${esc(account.status_detail || "")}<div class="help">Checked ${fmt(account.last_checked_at)}${account.access_expires_at ? " · token until " + fmt(account.access_expires_at) : ""}</div></td>
       <td class="actions">
         <button class="btn quiet" type="button" data-action="refresh-account" data-id="${account.id}">Refresh</button>
-        <button class="btn quiet" type="button" data-action="relogin" data-id="${account.id}">Reconnect</button>
+        <button class="btn quiet" type="button" data-action="relogin" data-id="${account.id}">Device sign-in</button>
         <button class="btn quiet" type="button" data-action="toggle-account" data-id="${account.id}" data-enabled="${account.enabled ? "0" : "1"}">${account.enabled ? "Disable" : "Enable"}</button>
         <button class="btn danger" type="button" data-action="delete-account" data-id="${account.id}">Remove</button>
       </td>
@@ -363,6 +396,21 @@ function accountsHtml(overview) {
         <tbody>${rows}</tbody>
       </table>
     </section>`;
+}
+
+function authMethodLabel(method) {
+  return method === "bearer_token" ? "Bearer token" : "Device sign-in";
+}
+
+function replaceTokenBox(account) {
+  return `
+    <form class="login-box stack" data-action="replace-bearer" data-id="${account.id}">
+      <div class="help">Replace the Minecraft Services access token. The raw value is never shown again after submit.</div>
+      <label>New bearer token
+        <input name="bearer_token" type="password" autocomplete="off" spellcheck="false" required minlength="40">
+      </label>
+      <button class="btn secondary" type="submit">Save token</button>
+    </form>`;
 }
 
 function loginBox(account) {
@@ -512,9 +560,29 @@ async function onSubmit(event) {
       return;
     }
     if (form.dataset.action === "add-account") {
-      await api("/api/accounts", { method: "POST", body: { label: data.label } });
+      const payload = {
+        label: data.label,
+        auth_method: data.auth_method || "device_code",
+      };
+      if (payload.auth_method === "bearer_token") {
+        payload.bearer_token = data.bearer_token || "";
+      }
+      const created = await api("/api/accounts", { method: "POST", body: payload });
       form.reset();
-      note("Microsoft sign-in started. Use the code on the account row.");
+      syncAuthMethodFields();
+      if (payload.auth_method === "bearer_token") {
+        note(`Bearer token accepted for ${created.mc_name || created.label}. Stored encrypted; only ${created.credential_hint || "a fingerprint"} is shown.`);
+      } else {
+        note("Microsoft sign-in started. Use the code on the account row.");
+      }
+    } else if (form.dataset.action === "replace-bearer") {
+      const accountId = form.dataset.id;
+      const updated = await api(`/api/accounts/${accountId}/bearer-token`, {
+        method: "POST",
+        body: { bearer_token: data.bearer_token || "" },
+      });
+      form.reset();
+      note(`Token replaced for ${updated.mc_name || updated.label}. Hint: ${updated.credential_hint || "configured"}.`);
     } else if (form.dataset.action === "add-target") {
       await api("/api/targets", {
         method: "POST",

@@ -14,7 +14,30 @@ NameMC is not part of this path. It has no role in authentication or claiming.
 
 ## What the operator proves
 
-The operator signs in to their own Microsoft account with the device-code flow. The app never asks for a Minecraft or Microsoft password. A refresh token is stored encrypted so the session can be renewed. The Minecraft bearer token is used only for that same account's profile.
+The operator signs in to their own Microsoft account with the device-code flow, **or** pastes a Minecraft Services bearer token obtained through that same official flow elsewhere. The app never asks for a Minecraft or Microsoft password. With device code, a refresh token is stored encrypted so the session can be renewed. The Minecraft bearer token is used only for that same account's profile.
+
+## Bearer token option (added credential entry)
+
+Supported token type: the Minecraft Services `access_token` returned by
+
+`POST https://api.minecraftservices.com/authentication/login_with_xbox`
+
+That token is a JWT. Clients send it as:
+
+`Authorization: Bearer <access_token>`
+
+It is the same credential the official profile, availability, and username-change endpoints already require. Arbitrary strings, Microsoft Graph tokens, Xbox user tokens alone, NameMC cookies, and launcher refresh tokens that have not been exchanged for a Minecraft Services access token are **not** accepted.
+
+| Property | Verified behavior |
+| --- | --- |
+| Issuer / use | Minecraft Services after Xbox login |
+| Typical lifetime | About 24 hours (`expires_in` ≈ 86400). JWT `exp` is read when present |
+| Scope | Profile read, name availability, username change for that account |
+| Refresh | This token itself has no refresh grant. Device-code accounts renew via the Microsoft refresh token. Bearer-token accounts must paste a new Minecraft access token when it expires or Minecraft returns 401 |
+| Validation | Before Ready: `GET /minecraft/profile` then `GET /minecraft/profile/namechange` |
+| Storage | Encrypted at rest. UI shows only a short fingerprint hint after submit. Never logged |
+
+This option does not bypass Minecraft authentication, rate limits, or rename cooldowns. It only lets the client supply a credential they already obtained through the supported flow, without typing a password into this app.
 
 ## 1. Azure application
 

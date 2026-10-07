@@ -13,8 +13,12 @@ RUN mkdir -p /app/data
 
 ENV PYTHONUNBUFFERED=1 \
     HOST=0.0.0.0 \
-    PORT=8000
+    PORT=8000 \
+    RUN_WORKER=1 \
+    SECURE_COOKIES=1 \
+    DATABASE_URL=sqlite:////app/data/sniper.db
 
 EXPOSE 8000
 
-CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Platforms inject PORT. Keep the worker inside this process for a single service.
+CMD ["sh", "-c", "python -m uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]

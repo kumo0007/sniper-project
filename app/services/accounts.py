@@ -53,6 +53,7 @@ async def start_device_login(http: httpx.AsyncClient, account_id: int) -> Device
             status="pending",
             encrypted_device_code=encrypt_secret(code.device_code),
         )
+        account.auth_method = "device_code"
         account.status = "authenticating"
         account.status_detail = "Waiting for Microsoft sign-in."
         account.updated_at = utcnow()

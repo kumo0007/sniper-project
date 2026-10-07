@@ -47,8 +47,8 @@ Use a **disposable** username and an account you can afford to rename. Each Java
 | Step | Action | What you should see |
 | --- | --- | --- |
 | 1 | Open the site and sign in | Monitor page loads |
-| 2 | Accounts → Connect Microsoft | Microsoft device code and link; no Minecraft password field |
-| 3 | Finish Microsoft sign-in | Account status becomes Ready or Cooldown; Minecraft name appears |
+| 2 | Accounts → choose device sign-in or bearer token | Microsoft device code, or paste a Minecraft Services access token; no Minecraft password field |
+| 3 | Finish auth | Account status becomes Ready or Cooldown; Minecraft name appears. Bearer tokens show only a fingerprint afterward |
 | 4 | Targets → add a username | Target appears with state Unavailable / Waiting |
 | 5 | Press Start | Sniper status shows Running |
 | 6 | Wait one check cycle (about 16+ seconds per account) | Target `last checked` updates; Activity shows `availability_check` |

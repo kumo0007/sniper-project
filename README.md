@@ -7,7 +7,7 @@ A small web app for monitoring usernames you type in yourself and changing them 
 ## What you can do
 
 - Sign in to this app with an operator password. That password is not a Minecraft password.
-- Connect about 10 of your own Microsoft/Minecraft accounts with Microsoft's device-code page. The app never asks for the account password.
+- Connect about 10 of your own Microsoft/Minecraft accounts with Microsoft's device-code page, or paste a Minecraft Services bearer token from the official flow. The app never asks for the account password.
 - Add and remove target usernames, including 3-character and OG names.
 - Start and stop monitoring. The monitor keeps running when the browser tab is closed.
 - See account state, target state, attempts, errors, and timestamps.
@@ -63,6 +63,10 @@ The monitor runs inside this process. To split them, set `RUN_WORKER=0` and run 
 Use a disposable username and an account you can afford to rename. Each account can change its Java username once every 30 days. Do not point the first test at a valuable 3-character name.
 
 The account must own Minecraft Java and already have a profile. Game Pass accounts sometimes need one launch of the official launcher before a profile exists.
+
+## Deploy online
+
+See [docs/DEPLOY.md](docs/DEPLOY.md). Use Railway or Render with a disk (not Vercel). For a quick temporary public URL while the app runs on your PC, use a Cloudflare quick tunnel.
 
 ## Production
 

@@ -7,10 +7,12 @@ import re
 _PATTERNS = (
     re.compile(r"Bearer\s+[A-Za-z0-9\-._~+/=]+", re.IGNORECASE),
     re.compile(
-        r"(refresh_token|access_token|device_code|id_token|RpsTicket|identityToken)"
+        r"(refresh_token|access_token|device_code|id_token|RpsTicket|identityToken|bearer_token)"
         r"(\"|'|%22)?\s*[:=]\s*(\"|'|%22)?[A-Za-z0-9\-._~+/=]{8,}",
         re.IGNORECASE,
     ),
+    # Standalone Minecraft-style JWTs accidentally copied into error text.
+    re.compile(r"\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-+/=]{10,}\b"),
 )
 
 

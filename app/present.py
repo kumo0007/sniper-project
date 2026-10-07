@@ -17,9 +17,14 @@ def device_login_view(login: DeviceLogin | None) -> dict | None:
 
 
 def account_view(account: Account) -> dict:
+    auth_method = account.auth_method or "device_code"
+    credential_configured = bool(account.encrypted_access_token or account.encrypted_refresh_token)
     return {
         "id": account.id,
         "label": account.label,
+        "auth_method": auth_method,
+        "credential_configured": credential_configured,
+        "credential_hint": account.credential_hint if credential_configured else None,
         "mc_uuid": account.mc_uuid,
         "mc_name": account.mc_name,
         "enabled": account.enabled,
@@ -28,6 +33,7 @@ def account_view(account: Account) -> dict:
         "name_change_allowed": account.name_change_allowed,
         "name_changed_at": iso(account.name_changed_at),
         "last_checked_at": iso(account.last_checked_at),
+        "access_expires_at": iso(account.access_expires_at),
         "rate_limited_until": iso(account.rate_limited_until),
         "created_at": iso(account.created_at),
         "login": device_login_view(account.device_login),

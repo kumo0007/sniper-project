@@ -17,6 +17,10 @@ class Account(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     label: Mapped[str] = mapped_column(String(80))
+    # device_code | bearer_token
+    auth_method: Mapped[str] = mapped_column(String(32), default="device_code")
+    # Short fingerprint only — never the raw token.
+    credential_hint: Mapped[str | None] = mapped_column(String(64), nullable=True)
     mc_uuid: Mapped[str | None] = mapped_column(String(36), nullable=True)
     mc_name: Mapped[str | None] = mapped_column(String(16), nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)

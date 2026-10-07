@@ -13,6 +13,7 @@ from app.models import Account, AttemptLog, SnipingJob, Target
 from app.present import account_view, job_view, log_view, target_view
 from app.security import COOKIE_NAME, SESSION_HOURS, issue_session, passwords_match, read_session
 from app.services.accounts import start_device_login
+from app.services.bearer import connect_with_bearer
 from app.services.milestone import build_milestone
 from app.services.monitor import check_target_now
 from app.services.scheduler import clamp_gap_seconds, clamp_slow_gap, clamp_window_hours
@@ -31,6 +32,12 @@ class LoginBody(BaseModel):
 
 class AccountBody(BaseModel):
     label: str = Field(min_length=1, max_length=80)
+    auth_method: str = "device_code"
+    bearer_token: str | None = None
+
+
+class BearerTokenBody(BaseModel):
+    bearer_token: str = Field(min_length=40, max_length=8192)
 
 
 class TargetBody(BaseModel):
@@ -210,6 +217,11 @@ async def create_account(body: AccountBody, request: Request) -> dict:
     label = body.label.strip()
     if not label:
         raise HTTPException(status_code=400, detail="Give the account a label.")
+    method = (body.auth_method or "device_code").strip().lower()
+    if method not in {"device_code", "bearer_token"}:
+        raise HTTPException(status_code=400, detail="Choose Microsoft device sign-in or bearer token.")
+    if method == "bearer_token" and not (body.bearer_token or "").strip():
+        raise HTTPException(status_code=400, detail="Paste a Minecraft Services bearer token.")
     with session_scope() as db:
         count = db.query(Account).count()
         if count >= get_settings().max_accounts:
@@ -217,17 +229,54 @@ async def create_account(body: AccountBody, request: Request) -> dict:
                 status_code=400,
                 detail=f"The account cap is {get_settings().max_accounts}. Remove one before adding another.",
             )
-        account = Account(label=label, status="needs_login", enabled=True, created_at=utcnow(), updated_at=utcnow())
+        account = Account(
+            label=label,
+            auth_method=method,
+            status="needs_login",
+            enabled=True,
+            created_at=utcnow(),
+            updated_at=utcnow(),
+        )
         db.add(account)
         db.flush()
         account_id = account.id
     try:
-        await start_device_login(request.app.state.http, account_id)
+        if method == "bearer_token":
+            await connect_with_bearer(request.app.state.http, account_id, body.bearer_token or "")
+        else:
+            await start_device_login(request.app.state.http, account_id)
+    except ValueError as exc:
+        with session_scope() as db:
+            account = db.get(Account, account_id)
+            if account is not None and not account.encrypted_access_token and not account.encrypted_refresh_token:
+                db.delete(account)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except MinecraftError as exc:
         with session_scope() as db:
             account = db.get(Account, account_id)
-            if account is not None and not account.encrypted_refresh_token:
+            if account is not None and not account.encrypted_access_token and not account.encrypted_refresh_token:
                 db.delete(account)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    with session_scope() as db:
+        account = db.get(Account, account_id)
+        assert account is not None
+        payload = account_view(account)
+        # Never echo a submitted token back to the client.
+        return payload
+
+
+@router.post("/accounts/{account_id}/bearer-token")
+async def replace_account_bearer(account_id: int, body: BearerTokenBody, request: Request) -> dict:
+    require_user(request)
+    with session_scope() as db:
+        account = db.get(Account, account_id)
+        if account is None:
+            raise HTTPException(status_code=404, detail="Account not found.")
+    try:
+        await connect_with_bearer(request.app.state.http, account_id, body.bearer_token)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except MinecraftError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     with session_scope() as db:
         account = db.get(Account, account_id)

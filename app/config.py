@@ -84,7 +84,8 @@ def get_settings() -> Settings:
         microsoft_client_id=os.environ.get("MICROSOFT_CLIENT_ID", "").strip(),
         database_url=_database_url(),
         run_worker=os.environ.get("RUN_WORKER", "1").strip() not in {"0", "false", "False"},
-        host=os.environ.get("HOST", "127.0.0.1").strip() or "127.0.0.1",
+        host=os.environ.get("HOST", "0.0.0.0" if os.environ.get("PORT") else "127.0.0.1").strip()
+        or "127.0.0.1",
         port=int(os.environ.get("PORT", "8000")),
         secure_cookies=os.environ.get("SECURE_COOKIES", "0").strip() in {"1", "true", "True"},
         max_accounts=_max_accounts(),
