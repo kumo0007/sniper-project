@@ -403,13 +403,16 @@ function authMethodLabel(method) {
 }
 
 function replaceTokenBox(account) {
+  const urgent = account.status === "auth_error";
   return `
     <form class="login-box stack" data-action="replace-bearer" data-id="${account.id}">
-      <div class="help">Replace the Minecraft Services access token. The raw value is never shown again after submit.</div>
+      <div class="help">${urgent
+        ? "Token expired or was rejected. Paste a fresh Minecraft Services access token to resume monitoring."
+        : "Replace the Minecraft Services access token. The raw value is never shown again after submit."}</div>
       <label>New bearer token
         <input name="bearer_token" type="password" autocomplete="off" spellcheck="false" required minlength="40">
       </label>
-      <button class="btn secondary" type="submit">Save token</button>
+      <button class="btn ${urgent ? "" : "secondary"}" type="submit">${urgent ? "Paste new token" : "Save token"}</button>
     </form>`;
 }
 

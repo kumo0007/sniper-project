@@ -6,13 +6,14 @@ from datetime import datetime, timedelta, timezone
 import httpx
 import pytest
 
-from app.crypto import decrypt_secret
+from app.crypto import decrypt_secret, encrypt_secret
 from app.db import session_scope
 from app.minecraft.errors import MinecraftError
 from app.minecraft.tokens import credential_hint, normalize_bearer_token
-from app.models import Account
+from app.models import Account, AttemptLog
 from app.services.sanitize import sanitize
-from app.services.sessions import ensure_access_token
+from app.services.sessions import BEARER_EXPIRED_DETAIL, ensure_access_token, expire_stale_credentials
+from app.timeutil import utcnow
 from tests.conftest import login
 
 
@@ -94,8 +95,14 @@ def test_bearer_valid_invalid_expired_replace_delete(client, monkeypatch):
         account = db.get(Account, account_id)
         account.access_expires_at = datetime.now(timezone.utc) - timedelta(minutes=1)
 
-    with pytest.raises(MinecraftError):
+    with pytest.raises(MinecraftError) as expired_exc:
         asyncio.run(ensure_access_token(httpx.AsyncClient(), account_id))
+    assert expired_exc.value.kind == "auth_error"
+    with session_scope() as db:
+        account = db.get(Account, account_id)
+        assert account.status == "auth_error"
+        assert account.encrypted_access_token is None
+        assert "Paste a new" in (account.status_detail or "")
 
     replacement = _fake_jwt({"exp": int((datetime.now(timezone.utc) + timedelta(hours=8)).timestamp())})
 
@@ -150,3 +157,82 @@ def test_bearer_endpoints_require_login(client):
     )
     assert replace.status_code == 401
     assert token not in replace.text
+
+
+def test_expire_stale_bearer_marks_auth_error_and_overview_surfaces_it(client):
+    csrf = login(client)
+    token = _fake_jwt({"exp": int((datetime.now(timezone.utc) + timedelta(hours=2)).timestamp())})
+    with session_scope() as db:
+        account = Account(
+            label="Stale",
+            auth_method="bearer_token",
+            status="ready",
+            enabled=True,
+            mc_name="StaleUser",
+            name_change_allowed=True,
+            encrypted_access_token=encrypt_secret(token),
+            access_expires_at=utcnow() - timedelta(minutes=2),
+            credential_hint=credential_hint(token),
+            created_at=utcnow(),
+            updated_at=utcnow(),
+        )
+        db.add(account)
+        db.flush()
+        account_id = account.id
+
+    with session_scope() as db:
+        assert expire_stale_credentials(db) == 1
+        account = db.get(Account, account_id)
+        assert account.status == "auth_error"
+        assert account.status_detail == BEARER_EXPIRED_DETAIL
+        assert account.encrypted_access_token is None
+        assert account.credential_hint is None
+
+    with session_scope() as db:
+        log = (
+            db.query(AttemptLog)
+            .filter(AttemptLog.account_id == account_id, AttemptLog.action == "auth_refresh")
+            .one()
+        )
+        assert log.result == "auth_error"
+        assert expire_stale_credentials(db) == 0
+
+    # Fresh "ready but expired" row should flip when overview loads.
+    with session_scope() as db:
+        account = db.get(Account, account_id)
+        account.status = "ready"
+        account.status_detail = None
+        account.encrypted_access_token = encrypt_secret(token)
+        account.access_expires_at = utcnow() - timedelta(seconds=30)
+        account.credential_hint = credential_hint(token)
+
+    overview = client.get("/api/overview")
+    assert overview.status_code == 200
+    row = next(item for item in overview.json()["accounts"] if item["id"] == account_id)
+    assert row["status"] == "auth_error"
+    assert "Paste a new" in (row["status_detail"] or "")
+    assert row["credential_configured"] is False
+    assert token not in overview.text
+
+
+def test_expire_stale_keeps_refreshable_device_accounts(client):
+    login(client)
+    with session_scope() as db:
+        account = Account(
+            label="Device",
+            auth_method="device_code",
+            status="ready",
+            enabled=True,
+            encrypted_refresh_token=encrypt_secret("refresh-token-value-123456"),
+            encrypted_access_token=encrypt_secret("access-token-value-1234567890"),
+            access_expires_at=utcnow() - timedelta(minutes=5),
+            created_at=utcnow(),
+            updated_at=utcnow(),
+        )
+        db.add(account)
+        db.flush()
+        account_id = account.id
+        assert expire_stale_credentials(db) == 0
+        account = db.get(Account, account_id)
+        assert account.status == "ready"
+        assert account.encrypted_refresh_token is not None

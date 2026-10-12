@@ -23,7 +23,7 @@ from app.minecraft.profile import (
 from app.models import Account, AttemptLog, SnipingJob, Target
 from app.services.sanitize import sanitize
 from app.services.scheduler import choose_account, choose_claim_account, choose_target, soonest_account_wait
-from app.services.sessions import apply_profile, ensure_access_token
+from app.services.sessions import apply_profile, ensure_access_token, expire_stale_credentials
 from app.services.settings_store import get_value, runtime_config, set_value
 from app.timeutil import as_utc, utcnow
 
@@ -92,6 +92,7 @@ async def run_once(http: httpx.AsyncClient) -> float:
         config = runtime_config(db)
         if not config["sniper_running"]:
             return 2.0
+        expire_stale_credentials(db, now)
         targets = db.query(Target).all()
         accounts = db.query(Account).all()
         target = choose_target(
@@ -129,13 +130,17 @@ async def check_target_now(http: httpx.AsyncClient, target_id: int) -> dict:
             }
         if target.state == "attempting":
             raise ValueError("A claim is already in progress for this name.")
+        expire_stale_credentials(db, now)
         config = runtime_config(db)
         accounts = db.query(Account).all()
         account = choose_account(accounts, now, config["per_account_gap_seconds"])
         if account is None:
             wait = soonest_account_wait(accounts, now, config["per_account_gap_seconds"])
             if wait is None:
-                raise ValueError("No connected account can check availability right now.")
+                raise ValueError(
+                    "No connected account can check availability right now. "
+                    "If you used a bearer token, paste a fresh one on the Accounts page."
+                )
             raise ValueError(
                 f"Every usable account is inside the {config['per_account_gap_seconds']}s check gap. "
                 f"Try again in about {max(1, int(wait))} second(s)."

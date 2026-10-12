@@ -17,7 +17,7 @@ from app.services.bearer import connect_with_bearer
 from app.services.milestone import build_milestone
 from app.services.monitor import check_target_now
 from app.services.scheduler import clamp_gap_seconds, clamp_slow_gap, clamp_window_hours
-from app.services.sessions import refresh_account_state
+from app.services.sessions import expire_stale_credentials, refresh_account_state
 from app.services.settings_store import runtime_config, set_value
 from app.timeutil import as_utc, utcnow
 from app.validate import clean_username, parse_hint, resolve_priority
@@ -139,6 +139,7 @@ def me(request: Request) -> dict:
 def overview(request: Request) -> dict:
     require_user(request)
     with session_scope() as db:
+        expire_stale_credentials(db)
         accounts = db.query(Account).order_by(Account.id).all()
         targets = db.query(Target).order_by(Target.id).all()
         logs = db.query(AttemptLog).order_by(AttemptLog.id.desc()).limit(80).all()

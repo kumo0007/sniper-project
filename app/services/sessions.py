@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import httpx
 
@@ -12,9 +12,68 @@ from app.db import session_scope
 from app.minecraft.auth import exchange_minecraft, refresh_msa
 from app.minecraft.errors import MinecraftError
 from app.minecraft.profile import get_name_change, read_profile_or_raise
-from app.models import Account
+from app.models import Account, AttemptLog
 from app.services.sanitize import sanitize
 from app.timeutil import as_utc, utcnow
+
+BEARER_EXPIRED_DETAIL = (
+    "This bearer token has expired or is missing. Paste a new Minecraft Services access token."
+)
+SESSION_MISSING_DETAIL = "This account has no saved Microsoft session. Connect it again."
+
+
+def expire_stale_credentials(db, now: datetime | None = None) -> int:
+    """Mark accounts whose stored credential can no longer authenticate.
+
+    Bearer-token accounts cannot refresh. Without this, they stay status=ready while
+    the monitor silently skips them after access_expires_at.
+    """
+    moment = now or utcnow()
+    marked = 0
+    for account in db.query(Account).all():
+        if not account.enabled or account.status in {
+            "auth_error",
+            "blocked",
+            "needs_login",
+            "authenticating",
+        }:
+            continue
+        auth_method = account.auth_method or "device_code"
+        expires = as_utc(account.access_expires_at)
+        has_access = bool(account.encrypted_access_token)
+        has_refresh = bool(account.encrypted_refresh_token)
+        expired = expires is not None and expires <= moment
+
+        if auth_method == "bearer_token":
+            if has_access and not expired:
+                continue
+            detail = BEARER_EXPIRED_DETAIL
+            account.encrypted_access_token = None
+            account.access_expires_at = None
+            account.credential_hint = None
+        elif has_refresh:
+            continue
+        elif has_access and not expired:
+            continue
+        else:
+            detail = SESSION_MISSING_DETAIL
+
+        account.status = "auth_error"
+        account.status_detail = detail
+        account.updated_at = moment
+        db.add(
+            AttemptLog(
+                account_id=account.id,
+                timestamp=moment,
+                action="auth_refresh",
+                result="auth_error",
+                detail=sanitize(detail),
+            )
+        )
+        marked += 1
+    if marked:
+        db.flush()
+    return marked
 
 
 def apply_profile(account: Account, profile: dict, namechange: dict | None) -> None:
@@ -103,6 +162,8 @@ async def refresh_account_state(http: httpx.AsyncClient, account_id: int) -> Non
 
 async def ensure_access_token(http: httpx.AsyncClient, account_id: int) -> str:
     """Return a usable Minecraft bearer token, refreshing it when the method supports that."""
+    refresh: str | None = None
+    expired_detail: str | None = None
     with session_scope() as db:
         account = db.get(Account, account_id)
         if account is None:
@@ -112,28 +173,34 @@ async def ensure_access_token(http: httpx.AsyncClient, account_id: int) -> str:
         refresh = decrypt_secret(account.encrypted_refresh_token)
         expires = as_utc(account.access_expires_at)
         now = utcnow()
-        if access and (expires is None or expires > now + timedelta(minutes=5)):
+        # Bearer tokens cannot be refreshed. An explicit past expiry must fail closed.
+        if access and expires and expires > now + timedelta(minutes=5):
             return access
         if access and expires and expires > now and (auth_method == "bearer_token" or not refresh):
             return access
+        if access and expires is None and refresh:
+            # Device-code session with unknown expiry: try refresh below.
+            pass
+        elif access and expires is None and auth_method != "bearer_token":
+            return access
         if auth_method == "bearer_token" or not refresh:
-            detail = (
-                "This bearer token has expired or is missing. Paste a new Minecraft Services access token."
-                if auth_method == "bearer_token"
-                else "This account has no saved Microsoft session. Connect it again."
-            )
+            expired_detail = BEARER_EXPIRED_DETAIL if auth_method == "bearer_token" else SESSION_MISSING_DETAIL
             account.status = "auth_error"
-            account.status_detail = detail
+            account.status_detail = expired_detail
             if auth_method == "bearer_token":
                 account.encrypted_access_token = None
                 account.access_expires_at = None
                 account.credential_hint = None
             account.updated_at = now
-            raise MinecraftError(detail, kind="auth_error")
+    if expired_detail:
+        # Raise after the session commits so auth_error is not rolled back.
+        raise MinecraftError(expired_detail, kind="auth_error")
 
     client_id = get_settings().microsoft_client_id
     if not client_id:
         raise MinecraftError("MICROSOFT_CLIENT_ID is not configured.", kind="auth_error")
+    if not refresh:
+        raise MinecraftError(SESSION_MISSING_DETAIL, kind="auth_error")
     try:
         msa = await refresh_msa(http, client_id, refresh)
         mc = await exchange_minecraft(http, msa.access_token)
