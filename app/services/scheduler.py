@@ -56,24 +56,52 @@ def effective_check_interval(account_count: int, min_gap: int = AVAILABILITY_MIN
     return max(0.5, min_gap / usable)
 
 
-def gap_for_target(target, now: datetime, slow_gap: int, before_hours: int, after_hours: int) -> int:
+def _release_bounds(target, before_hours: int, after_hours: int) -> tuple[datetime, datetime] | None:
     hint = as_utc(getattr(target, "release_hint_at", None))
     if hint is None:
-        return 0
+        return None
+    end = as_utc(getattr(target, "release_hint_end_at", None))
+    if end is None:
+        end = hint + timedelta(hours=after_hours)
     start = hint - timedelta(hours=before_hours)
-    end = hint + timedelta(hours=after_hours)
+    if end < start:
+        start, end = end, start
+    return start, end
+
+
+def gap_for_target(target, now: datetime, slow_gap: int, before_hours: int, after_hours: int) -> int:
+    bounds = _release_bounds(target, before_hours, after_hours)
+    if bounds is None:
+        return 0
+    start, end = bounds
     if start <= now <= end:
         return 0
     return slow_gap
 
 
 def in_release_window(target, now: datetime, before_hours: int, after_hours: int) -> bool:
-    hint = as_utc(getattr(target, "release_hint_at", None))
-    if hint is None:
+    bounds = _release_bounds(target, before_hours, after_hours)
+    if bounds is None:
         return False
-    start = hint - timedelta(hours=before_hours)
-    end = hint + timedelta(hours=after_hours)
+    start, end = bounds
     return start <= now <= end
+
+
+def stagger_account_checks(accounts, now: datetime, min_gap: int) -> int:
+    """Spread last-check times so ready accounts fire evenly across the gap.
+
+    Returns how many accounts were staggered. Call when Start is pressed so a
+    multi-account 3c race does not clump all checks into the first second.
+    """
+    usable = [row for row in accounts if _account_usable(row, now, require_name_change=False)]
+    count = len(usable)
+    if count == 0:
+        return 0
+    step = min_gap / count
+    for index, account in enumerate(usable):
+        account.last_availability_check_at = now - timedelta(seconds=min_gap) + timedelta(seconds=step * index)
+        account.updated_at = now
+    return count
 
 
 def _eligible_target(target, now: datetime, slow_gap: int, before_hours: int, after_hours: int) -> bool:

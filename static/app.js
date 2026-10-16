@@ -237,7 +237,7 @@ function viewIntro() {
     return `
       <section class="panel">
         <h2>Add a username</h2>
-        <p class="help">Names are checked with the official availability endpoint. A release hint only slows checks until the window around that time. It never triggers a claim by itself.</p>
+        <p class="help">Use NameMC drop window start/end for 3c/OG races. Hints only change check pace — claims still require Mojang AVAILABLE. Perfect wins are not guaranteed.</p>
         <form class="form-grid" data-action="add-target" style="margin-top:14px">
           <label>Username
             <input name="username" minlength="3" maxlength="16" placeholder="abc" required>
@@ -250,8 +250,11 @@ function viewIntro() {
               <option value="normal">Normal</option>
             </select>
           </label>
-          <label>Release hint (optional)
+          <label>Drop window start (optional)
             <input name="release_hint_at" type="datetime-local">
+          </label>
+          <label>Drop window end (optional)
+            <input name="release_hint_end_at" type="datetime-local">
           </label>
           <button class="btn" type="submit">Add target</button>
         </form>
@@ -324,9 +327,9 @@ function raceCallout(overview) {
   const usable = race.usable_accounts ?? 0;
   const interval = race.effective_check_interval_seconds ?? overview.settings.per_account_gap_seconds;
   if (race.focus_3c_og) {
-    return ` <strong>3c/OG race mode is on.</strong> Normal targets are paused so all bandwidth goes to 3c/OG names. With ${usable} usable account(s), checks are about every <strong>${esc(interval)}s</strong>. On AVAILABLE, up to ${esc(overview.settings.claim_accounts_per_burst_hot || 8)} accounts claim in parallel (max ${esc(overview.settings.claim_max_per_minute_hot || 12)} renames/min). Add more rename-ready accounts to compete better.`;
+    return ` <strong>3c/OG race mode is on.</strong> Normal targets are paused. With ${usable} usable account(s), checks are about every <strong>${esc(interval)}s</strong>. On AVAILABLE, up to ${esc(overview.settings.claim_accounts_per_burst_hot || 8)} accounts claim in parallel (max ${esc(overview.settings.claim_max_per_minute_hot || 12)} renames/min). This improves odds — it does <strong>not</strong> guarantee a win on hyped 3c drops. Aim for 8–25 rename-ready accounts.`;
   }
-  return ` At most 3 rename requests/min for normal targets. Add a 3c/OG target to enable race mode. For a quick demo, use a disposable free name and Check now.`;
+  return ` At most 3 rename requests/min for normal targets. Add a 3c/OG target to enable race mode. Wins are never guaranteed.`;
 }
 
 function successPanel(claimed) {
@@ -448,7 +451,7 @@ function targetsHtml(overview) {
       <td>${pill(target.priority, priorityLabel(target.priority))}</td>
       <td>${pill(target.state, labelStatus(target.state))}${target.enabled ? "" : " <span class='help'>paused</span>"}</td>
       <td>${esc(target.state_detail || "")}<div class="help">Checked ${fmt(target.last_checked_at)}${target.claimed_by_name ? " · " + esc(target.claimed_by_name) : ""}</div></td>
-      <td>${target.release_hint_at ? fmt(target.release_hint_at) : "—"}</td>
+      <td>${target.release_hint_at ? esc(fmt(target.release_hint_at)) + (target.release_hint_end_at ? " → " + esc(fmt(target.release_hint_end_at)) : "") : "—"}</td>
       <td class="actions">
         <button class="btn quiet" type="button" data-action="check-target" data-id="${target.id}" ${target.state === "successful" || target.state === "attempting" ? "disabled" : ""}>Check now</button>
         <button class="btn quiet" type="button" data-action="toggle-target" data-id="${target.id}" data-enabled="${target.enabled ? "0" : "1"}">${target.enabled ? "Pause" : "Resume"}</button>
@@ -602,6 +605,7 @@ async function onSubmit(event) {
           username: data.username,
           priority: data.priority,
           release_hint_at: data.release_hint_at ? new Date(data.release_hint_at).toISOString() : null,
+          release_hint_end_at: data.release_hint_end_at ? new Date(data.release_hint_end_at).toISOString() : null,
         },
       });
       form.reset();
@@ -637,7 +641,14 @@ async function onClick(event) {
   if (!button || button.closest("form")) return;
   const id = button.dataset.id;
   try {
-    if (button.dataset.action === "start") await api("/api/sniper/start", { method: "POST", body: {} });
+    if (button.dataset.action === "start") {
+      const started = await api("/api/sniper/start", { method: "POST", body: {} });
+      if (started.race?.focus_3c_og) {
+        note(`Race mode ready: ${started.race.usable_accounts} accounts ≈ every ${started.race.effective_check_interval_seconds}s. ${started.race.note || ""}`);
+      } else {
+        note("Sniper started.");
+      }
+    }
     if (button.dataset.action === "stop") await api("/api/sniper/stop", { method: "POST", body: {} });
     if (button.dataset.action === "logout") {
       await api("/api/logout", { method: "POST", body: {} });

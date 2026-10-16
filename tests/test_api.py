@@ -28,12 +28,26 @@ def test_health_and_login_gate(client):
 def test_three_character_priority_start_stop_and_gap(client):
     csrf = login(client)
     headers = {"X-CSRF-Token": csrf}
-    created = client.post("/api/targets", json={"username": "ace"}, headers=headers)
+    created = client.post(
+        "/api/targets",
+        json={
+            "username": "ace",
+            "release_hint_at": "2026-10-16T03:19:00+00:00",
+            "release_hint_end_at": "2026-10-17T02:28:00+00:00",
+        },
+        headers=headers,
+    )
     assert created.status_code == 201
     assert created.json()["priority"] == "3c"
-    assert client.post("/api/sniper/start", headers=headers).json()["sniper_running"] is True
+    assert created.json()["release_hint_end_at"] is not None
+    started = client.post("/api/sniper/start", headers=headers).json()
+    assert started["sniper_running"] is True
+    assert started["race"]["focus_3c_og"] is True
+    assert started["race"]["perfect_win_guaranteed"] is False
     overview = client.get("/api/overview")
-    assert overview.json()["sniper_running"] is True
+    body = overview.json()
+    assert body["sniper_running"] is True
+    assert body["race"]["focus_3c_og"] is True
     assert client.post("/api/sniper/stop", headers=headers).json()["sniper_running"] is False
     too_fast = client.put(
         "/api/settings",

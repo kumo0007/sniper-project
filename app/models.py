@@ -78,6 +78,8 @@ class Target(Base):
     state_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     release_hint_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Optional NameMC-style window end. When set, fast polling spans hint_at → hint_end_at.
+    release_hint_end_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     claim_blocked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     claimed_by_account_id: Mapped[int | None] = mapped_column(

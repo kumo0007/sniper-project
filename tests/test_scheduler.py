@@ -11,7 +11,9 @@ from app.services.scheduler import (
     clamp_gap_seconds,
     effective_check_interval,
     focus_high_priority,
+    in_release_window,
     list_claim_accounts,
+    stagger_account_checks,
 )
 
 
@@ -23,6 +25,7 @@ def _target(**kwargs):
         claim_blocked_until=None,
         last_checked_at=None,
         release_hint_at=None,
+        release_hint_end_at=None,
         priority="normal",
     )
     base.update(kwargs)
@@ -112,6 +115,29 @@ def test_list_claim_accounts_limits_rename_ready():
         2,
     )
     assert [row.id for row in rows] == [1, 3]
+
+
+def test_drop_window_end_keeps_fast_polling():
+    now = datetime(2026, 10, 16, 12, tzinfo=timezone.utc)
+    target = _target(
+        priority="3c",
+        release_hint_at=now - timedelta(hours=1),
+        release_hint_end_at=now + timedelta(hours=6),
+        last_checked_at=now - timedelta(seconds=1),
+    )
+    assert in_release_window(target, now, before_hours=2, after_hours=6) is True
+    assert choose_target([target], now, slow_gap=600, before_hours=2, after_hours=6) is target
+
+
+def test_stagger_spreads_account_checks():
+    now = datetime(2026, 10, 7, tzinfo=timezone.utc)
+    accounts = [_account(id=i) for i in range(1, 5)]
+    assert stagger_account_checks(accounts, now, 16) == 4
+    times = [row.last_availability_check_at for row in accounts]
+    assert times[0] < times[1] < times[2] < times[3]
+    assert choose_account(accounts, now, 16).id == 1
+    accounts[0].last_availability_check_at = now
+    assert choose_account(accounts, now + timedelta(seconds=4), 16).id == 2
 
 
 def test_release_hint_uses_the_slow_gap_outside_the_window():

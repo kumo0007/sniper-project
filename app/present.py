@@ -50,6 +50,7 @@ def target_view(target: Target, claimed_name: str | None = None) -> dict:
         "state_detail": target.state_detail,
         "last_checked_at": iso(target.last_checked_at),
         "release_hint_at": iso(target.release_hint_at),
+        "release_hint_end_at": iso(getattr(target, "release_hint_end_at", None)),
         "claim_blocked_until": iso(target.claim_blocked_until),
         "claimed_at": iso(target.claimed_at),
         "claimed_by_account_id": target.claimed_by_account_id,

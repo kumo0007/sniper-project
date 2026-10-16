@@ -53,11 +53,14 @@ def _migrate_sqlite(engine: Engine) -> None:
     if not str(engine.url).startswith("sqlite"):
         return
     with engine.begin() as conn:
-        columns = {row[1] for row in conn.execute(text("PRAGMA table_info(accounts)")).fetchall()}
-        if "auth_method" not in columns:
+        account_columns = {row[1] for row in conn.execute(text("PRAGMA table_info(accounts)")).fetchall()}
+        if "auth_method" not in account_columns:
             conn.execute(text("ALTER TABLE accounts ADD COLUMN auth_method VARCHAR(32) DEFAULT 'device_code'"))
-        if "credential_hint" not in columns:
+        if "credential_hint" not in account_columns:
             conn.execute(text("ALTER TABLE accounts ADD COLUMN credential_hint VARCHAR(64)"))
+        target_columns = {row[1] for row in conn.execute(text("PRAGMA table_info(targets)")).fetchall()}
+        if "release_hint_end_at" not in target_columns:
+            conn.execute(text("ALTER TABLE targets ADD COLUMN release_hint_end_at DATETIME"))
 
 
 def init_db() -> None:

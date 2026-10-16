@@ -28,8 +28,9 @@ from app.services.scheduler import (
     count_usable_accounts,
     effective_check_interval,
     focus_high_priority,
+    stagger_account_checks,
 )
-from app.services.sessions import expire_stale_credentials, refresh_account_state
+from app.services.sessions import ensure_access_token, expire_stale_credentials, refresh_account_state
 from app.services.settings_store import runtime_config, set_value
 from app.timeutil import as_utc, utcnow
 from app.validate import clean_username, parse_hint, resolve_priority
@@ -56,12 +57,14 @@ class TargetBody(BaseModel):
     username: str
     priority: str | None = None
     release_hint_at: str | None = None
+    release_hint_end_at: str | None = None
     enabled: bool = True
 
 
 class TargetPatch(BaseModel):
     priority: str | None = None
     release_hint_at: str | None = None
+    release_hint_end_at: str | None = None
     enabled: bool | None = None
     clear_release_hint: bool = False
 
@@ -220,11 +223,40 @@ def update_settings(body: SettingsBody, request: Request) -> dict:
 
 
 @router.post("/sniper/start")
-def sniper_start(request: Request) -> dict:
+async def sniper_start(request: Request) -> dict:
     require_user(request)
     with session_scope() as db:
+        config = runtime_config(db)
+        gap = config["per_account_gap_seconds"]
         set_value(db, "sniper_running", "1")
-    return {"sniper_running": True}
+        accounts = db.query(Account).order_by(Account.id).all()
+        staggered = stagger_account_checks(accounts, utcnow(), gap)
+        account_ids = [row.id for row in accounts if row.enabled]
+        focusing = focus_high_priority(db.query(Target).all())
+        usable = count_usable_accounts(accounts, utcnow())
+    warmed = 0
+    if focusing:
+        for account_id in account_ids:
+            try:
+                await ensure_access_token(request.app.state.http, account_id)
+                warmed += 1
+            except Exception:
+                continue
+    return {
+        "sniper_running": True,
+        "race": {
+            "focus_3c_og": focusing,
+            "staggered_accounts": staggered,
+            "usable_accounts": usable,
+            "effective_check_interval_seconds": round(effective_check_interval(max(usable, staggered), gap), 2),
+            "tokens_warmed": warmed,
+            "perfect_win_guaranteed": False,
+            "note": (
+                "3c/OG race mode prepared (staggered checks + warmed tokens). "
+                "Wins are not guaranteed against faster competing snipers."
+            ),
+        },
+    }
 
 
 @router.post("/sniper/stop")
@@ -379,6 +411,11 @@ def create_target(body: TargetBody, request: Request) -> dict:
         username = clean_username(body.username)
         priority = resolve_priority(username, body.priority)
         hint = parse_hint(body.release_hint_at)
+        hint_end = parse_hint(body.release_hint_end_at)
+        if hint_end is not None and hint is None:
+            raise ValueError("Set the drop window start before the end.")
+        if hint is not None and hint_end is not None and hint_end < hint:
+            raise ValueError("Drop window end must be after the start.")
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     with session_scope() as db:
@@ -393,6 +430,7 @@ def create_target(body: TargetBody, request: Request) -> dict:
             state="unavailable",
             state_detail="Waiting for the monitor.",
             release_hint_at=hint,
+            release_hint_end_at=hint_end,
             created_at=utcnow(),
             updated_at=utcnow(),
         )
@@ -413,8 +451,18 @@ def patch_target(target_id: int, body: TargetPatch, request: Request) -> dict:
                 target.priority = resolve_priority(target.username, body.priority)
             if body.clear_release_hint:
                 target.release_hint_at = None
-            elif body.release_hint_at is not None:
-                target.release_hint_at = parse_hint(body.release_hint_at)
+                target.release_hint_end_at = None
+            else:
+                if body.release_hint_at is not None:
+                    target.release_hint_at = parse_hint(body.release_hint_at)
+                if body.release_hint_end_at is not None:
+                    target.release_hint_end_at = parse_hint(body.release_hint_end_at)
+                if (
+                    target.release_hint_at is not None
+                    and target.release_hint_end_at is not None
+                    and target.release_hint_end_at < target.release_hint_at
+                ):
+                    raise ValueError("Drop window end must be after the start.")
             if body.enabled is not None:
                 target.enabled = body.enabled
                 if body.enabled and target.state == "successful":
