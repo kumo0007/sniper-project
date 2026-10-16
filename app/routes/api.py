@@ -6,7 +6,12 @@ import time
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
-from app.config import AVAILABILITY_MIN_GAP_SECONDS, get_settings
+from app.config import (
+    AVAILABILITY_MIN_GAP_SECONDS,
+    CLAIM_ACCOUNTS_PER_BURST_HOT,
+    CLAIM_MAX_PER_MINUTE_HOT,
+    get_settings,
+)
 from app.db import session_scope
 from app.minecraft.errors import MinecraftError
 from app.models import Account, AttemptLog, SnipingJob, Target
@@ -16,7 +21,14 @@ from app.services.accounts import start_device_login
 from app.services.bearer import connect_with_bearer
 from app.services.milestone import build_milestone
 from app.services.monitor import check_target_now
-from app.services.scheduler import clamp_gap_seconds, clamp_slow_gap, clamp_window_hours
+from app.services.scheduler import (
+    clamp_gap_seconds,
+    clamp_slow_gap,
+    clamp_window_hours,
+    count_usable_accounts,
+    effective_check_interval,
+    focus_high_priority,
+)
 from app.services.sessions import expire_stale_credentials, refresh_account_state
 from app.services.settings_store import runtime_config, set_value
 from app.timeutil import as_utc, utcnow
@@ -149,16 +161,27 @@ def overview(request: Request) -> dict:
         claimed = {row.id: row.mc_name or row.label for row in accounts}
         config = runtime_config(db)
         milestone = build_milestone(db)
+        now = utcnow()
+        usable = count_usable_accounts(accounts, now)
+        gap = config["per_account_gap_seconds"]
+        focusing = focus_high_priority(targets)
         return {
             "sniper_running": config["sniper_running"],
             "settings": {
-                "per_account_gap_seconds": config["per_account_gap_seconds"],
+                "per_account_gap_seconds": gap,
                 "slow_gap_seconds": config["slow_gap_seconds"],
                 "fast_window_before_hours": config["fast_window_before_hours"],
                 "fast_window_after_hours": config["fast_window_after_hours"],
                 "availability_min_gap_seconds": AVAILABILITY_MIN_GAP_SECONDS,
                 "max_accounts": get_settings().max_accounts,
                 "microsoft_client_configured": bool(get_settings().microsoft_client_id),
+                "claim_max_per_minute_hot": CLAIM_MAX_PER_MINUTE_HOT,
+                "claim_accounts_per_burst_hot": CLAIM_ACCOUNTS_PER_BURST_HOT,
+            },
+            "race": {
+                "focus_3c_og": focusing,
+                "usable_accounts": usable,
+                "effective_check_interval_seconds": round(effective_check_interval(usable, gap), 2),
             },
             "worker": {
                 "owner": config["worker_owner"],

@@ -310,14 +310,23 @@ function monitorHtml(overview) {
     ${milestoneHtml(overview.milestone)}
     <section class="callout">
       <strong>How a claim happens.</strong>
-      The monitor asks Mojang whether the name is AVAILABLE, then sends one username change on an account whose 30-day cooldown has cleared.
-      Success is recorded only after a second profile read shows the new name.
-      Each account waits at least ${esc(overview.settings.per_account_gap_seconds)} seconds between availability checks.
-      At most 3 rename requests are sent per minute.
-      For the first milestone, use a disposable username and press Check now on a target if you want one official check immediately.
+      The monitor asks Mojang whether the name is AVAILABLE, then sends username-change requests on rename-ready accounts.
+      Success is recorded only after a profile read shows the new name.
+      Each account waits at least ${esc(overview.settings.per_account_gap_seconds)}s between checks; more accounts stagger for a faster effective poll.
+      ${raceCallout(overview)}
     </section>
     ${targetsHtml(overview)}
     ${activityHtml(overview, 8)}`;
+}
+
+function raceCallout(overview) {
+  const race = overview.race || {};
+  const usable = race.usable_accounts ?? 0;
+  const interval = race.effective_check_interval_seconds ?? overview.settings.per_account_gap_seconds;
+  if (race.focus_3c_og) {
+    return ` <strong>3c/OG race mode is on.</strong> Normal targets are paused so all bandwidth goes to 3c/OG names. With ${usable} usable account(s), checks are about every <strong>${esc(interval)}s</strong>. On AVAILABLE, up to ${esc(overview.settings.claim_accounts_per_burst_hot || 8)} accounts claim in parallel (max ${esc(overview.settings.claim_max_per_minute_hot || 12)} renames/min). Add more rename-ready accounts to compete better.`;
+  }
+  return ` At most 3 rename requests/min for normal targets. Add a 3c/OG target to enable race mode. For a quick demo, use a disposable free name and Check now.`;
 }
 
 function successPanel(claimed) {

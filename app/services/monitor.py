@@ -9,7 +9,14 @@ from datetime import datetime, timedelta
 
 import httpx
 
-from app.config import CLAIM_ACCOUNTS_PER_BURST, CLAIM_BURST_COOLDOWN_SECONDS, CLAIM_MAX_PER_MINUTE
+from app.config import (
+    CLAIM_ACCOUNTS_PER_BURST,
+    CLAIM_ACCOUNTS_PER_BURST_HOT,
+    CLAIM_BURST_COOLDOWN_SECONDS,
+    CLAIM_MAX_PER_MINUTE,
+    CLAIM_MAX_PER_MINUTE_HOT,
+    HIGH_PRIORITY,
+)
 from app.db import session_scope
 from app.minecraft.errors import MinecraftError
 from app.minecraft.profile import (
@@ -22,7 +29,15 @@ from app.minecraft.profile import (
 )
 from app.models import Account, AttemptLog, SnipingJob, Target
 from app.services.sanitize import sanitize
-from app.services.scheduler import choose_account, choose_claim_account, choose_target, soonest_account_wait
+from app.services.scheduler import (
+    choose_account,
+    choose_target,
+    count_usable_accounts,
+    effective_check_interval,
+    is_high_priority,
+    list_claim_accounts,
+    soonest_account_wait,
+)
 from app.services.sessions import apply_profile, ensure_access_token, expire_stale_credentials
 from app.services.settings_store import get_value, runtime_config, set_value
 from app.timeutil import as_utc, utcnow
@@ -73,6 +88,12 @@ def _claims_last_minute(db, now: datetime) -> int:
     )
 
 
+def _claim_limits(priority: str | None) -> tuple[int, int]:
+    if (priority or "normal") in HIGH_PRIORITY:
+        return CLAIM_MAX_PER_MINUTE_HOT, CLAIM_ACCOUNTS_PER_BURST_HOT
+    return CLAIM_MAX_PER_MINUTE, CLAIM_ACCOUNTS_PER_BURST
+
+
 def _mark_account_backoff(db, account_id: int, seconds: int, detail: str, status: str = "error") -> None:
     account = db.get(Account, account_id)
     if account is None:
@@ -104,15 +125,25 @@ async def run_once(http: httpx.AsyncClient) -> float:
         )
         if target is None:
             return 5.0
-        account = choose_account(accounts, now, config["per_account_gap_seconds"])
+        gap = config["per_account_gap_seconds"]
+        account = choose_account(accounts, now, gap)
         if account is None:
-            wait = soonest_account_wait(accounts, now, config["per_account_gap_seconds"])
-            return 5.0 if wait is None else max(0.5, min(5.0, wait))
+            wait = soonest_account_wait(accounts, now, gap)
+            if wait is None:
+                return 5.0
+            # Stay snappy for 3c/OG so the next staggered account fires immediately.
+            ceiling = 1.0 if is_high_priority(target) else 5.0
+            return max(0.05, min(ceiling, wait))
         target_id = target.id
         account_id = account.id
+        hot = is_high_priority(target)
+        usable = count_usable_accounts(accounts, now)
 
     await _check_and_maybe_claim(http, target_id, account_id)
-    return 0.5
+    # After a check, poll again quickly; multi-account stagger fills the 16s gap.
+    if hot:
+        return min(0.2, effective_check_interval(usable, gap) / 2)
+    return 0.35
 
 
 async def check_target_now(http: httpx.AsyncClient, target_id: int) -> dict:
@@ -239,8 +270,10 @@ async def _check_and_maybe_claim(http: httpx.AsyncClient, target_id: int, accoun
             state = "unavailable" if checked.result == "unavailable" else "unknown_error"
             _set_target(db, target_id, state, checked.detail)
             return state
+        target_row = db.get(Target, target_id)
+        priority = target_row.priority if target_row is not None else "normal"
 
-    await _claim_burst(http, target_id, username)
+    await _claim_burst(http, target_id, username, priority=priority)
     with session_scope() as db:
         target = db.get(Target, target_id)
         return target.state if target else "attempting"
@@ -258,13 +291,21 @@ def _set_target(db, target_id: int, state: str, detail: str, *, disable: bool = 
         target.enabled = False
 
 
-async def _claim_burst(http: httpx.AsyncClient, target_id: int, username: str) -> None:
+async def _claim_burst(
+    http: httpx.AsyncClient,
+    target_id: int,
+    username: str,
+    *,
+    priority: str = "normal",
+) -> None:
     now = utcnow()
+    max_per_minute, burst_size = _claim_limits(priority)
+    hot = (priority or "normal") in HIGH_PRIORITY
     with session_scope() as db:
         target = db.get(Target, target_id)
         if target is None or target.state == "successful" or not target.enabled:
             return
-        if _claims_last_minute(db, now) >= CLAIM_MAX_PER_MINUTE:
+        if _claims_last_minute(db, now) >= max_per_minute:
             target.state = "rate_limited"
             target.state_detail = "Claim paused because the rename budget for this minute is already used."
             target.claim_blocked_until = now + timedelta(seconds=CLAIM_BURST_COOLDOWN_SECONDS)
@@ -276,7 +317,11 @@ async def _claim_burst(http: httpx.AsyncClient, target_id: int, username: str) -
             .update(
                 {
                     Target.state: "attempting",
-                    Target.state_detail: "Availability was confirmed. Starting a username change.",
+                    Target.state_detail: (
+                        "AVAILABLE confirmed. Firing parallel 3c/OG claim burst."
+                        if hot
+                        else "Availability was confirmed. Starting a username change."
+                    ),
                     Target.updated_at: now,
                 },
                 synchronize_session=False,
@@ -288,39 +333,51 @@ async def _claim_burst(http: httpx.AsyncClient, target_id: int, username: str) -
         db.add(job)
         db.flush()
         job_id = job.id
+        remaining = max_per_minute - _claims_last_minute(db, now)
+        accounts = list_claim_accounts(db.query(Account).all(), now, min(burst_size, max(1, remaining)))
+        account_ids = [row.id for row in accounts]
 
-    attempts = 0
+    if not account_ids:
+        with session_scope() as db:
+            target = db.get(Target, target_id)
+            job = db.get(SnipingJob, job_id)
+            detail = "No connected account is currently allowed to change its username."
+            if job is not None:
+                job.attempt_count = 0
+                job.finished_at = utcnow()
+                job.status = "failed"
+                job.result_detail = detail
+            if target is not None and target.state != "successful":
+                target.state = "failed"
+                target.state_detail = detail
+                target.claim_blocked_until = utcnow() + timedelta(seconds=CLAIM_BURST_COOLDOWN_SECONDS)
+                target.updated_at = utcnow()
+        return
+
+    # Fire renames together so the first rename-ready account wins the race.
+    results = await asyncio.gather(
+        *[
+            _claim_with_account(http, target_id, username, account_id, job_id, fast=hot)
+            for account_id in account_ids
+        ],
+        return_exceptions=True,
+    )
+
     final_result = "failed"
     final_detail = "No account was able to change its name."
-    used_accounts: set[int] = set()
-
-    while attempts < CLAIM_ACCOUNTS_PER_BURST:
-        with session_scope() as db:
-            if _claims_last_minute(db, utcnow()) >= CLAIM_MAX_PER_MINUTE:
-                final_result = "rate_limited"
-                final_detail = "Stopped this claim burst at the per-minute rename limit."
-                break
-            accounts = [row for row in db.query(Account).all() if row.id not in used_accounts]
-            account = choose_claim_account(accounts, utcnow())
-            if account is None:
-                final_result = "failed"
-                final_detail = "No connected account is currently allowed to change its username."
-                break
-            account_id = account.id
-        used_accounts.add(account_id)
+    attempts = 0
+    for item in results:
         attempts += 1
-        outcome, detail = await _claim_with_account(http, target_id, username, account_id, job_id)
+        if isinstance(item, Exception):
+            final_result = "unknown_error"
+            final_detail = sanitize(str(item))
+            continue
+        outcome, detail = item
         final_result, final_detail = outcome, detail
         if outcome == "success":
             break
-        if outcome in {"rate_limited", "unavailable", "failed"}:
+        if outcome in {"rate_limited", "unavailable"}:
             break
-        if outcome in {"cooldown", "authentication_error", "auth_error"}:
-            continue
-        if outcome == "unknown_error":
-            await asyncio.sleep(2)
-            continue
-        break
 
     with session_scope() as db:
         target = db.get(Target, target_id)
@@ -350,7 +407,15 @@ async def _claim_burst(http: httpx.AsyncClient, target_id: int, username: str) -
         target.updated_at = utcnow()
 
 
-async def _claim_with_account(http: httpx.AsyncClient, target_id: int, username: str, account_id: int, job_id: int) -> tuple[str, str]:
+async def _claim_with_account(
+    http: httpx.AsyncClient,
+    target_id: int,
+    username: str,
+    account_id: int,
+    job_id: int,
+    *,
+    fast: bool = False,
+) -> tuple[str, str]:
     try:
         token = await ensure_access_token(http, account_id)
     except MinecraftError as exc:
@@ -371,36 +436,46 @@ async def _claim_with_account(http: httpx.AsyncClient, target_id: int, username:
             return "auth_error", str(exc)
         return "unknown_error", str(exc)
 
-    try:
-        profile_status, profile = await get_profile(http, token)
-    except httpx.HTTPError:
-        with session_scope() as db:
-            _log(db, action="profile_confirm", result="unknown_error", detail="Network error before rename.", target_id=target_id, account_id=account_id, job_id=job_id)
-            _mark_account_backoff(db, account_id, 30, "Network error before a username change.")
-        return "unknown_error", "Network error before the username change."
-
-    if profile_status == 200 and profile_has_name(profile, username):
-        _mark_success(target_id, account_id, job_id, profile)
-        return "success", "This account already had the target name, confirmed from its profile."
-
-    try:
-        eligible_status, namechange = await get_name_change(http, token)
-    except httpx.HTTPError:
-        return "unknown_error", "Network error while checking whether the account can rename."
-
-    if eligible_status == 429:
-        with session_scope() as db:
-            _mark_account_backoff(db, account_id, 90, "Rate limited while checking name-change eligibility.")
-            _log(db, action="namechange_check", result="rate_limited", detail="Name-change eligibility was rate limited.", target_id=target_id, account_id=account_id, job_id=job_id, http_status=429)
-        return "rate_limited", "Rate limited while checking name-change eligibility."
-    if eligible_status == 200 and namechange.get("nameChangeAllowed") is False:
+    # Fast 3c/OG path: skip pre-claim profile/eligibility RTTs when DB already says rename-ready.
+    skip_prechecks = False
+    if fast:
         with session_scope() as db:
             account = db.get(Account, account_id)
-            if account is not None:
-                apply_profile(account, profile if profile_status == 200 else {"id": account.mc_uuid, "name": account.mc_name}, namechange)
-                account.status = "cooldown"
-            _log(db, action="namechange_check", result="cooldown", detail="Account is inside the 30-day rename cooldown.", target_id=target_id, account_id=account_id, job_id=job_id, http_status=200)
-        return "cooldown", "Account is inside the 30-day rename cooldown."
+            skip_prechecks = bool(account and account.name_change_allowed is True)
+
+    profile_status = 0
+    profile: dict = {}
+    if not skip_prechecks:
+        try:
+            profile_status, profile = await get_profile(http, token)
+        except httpx.HTTPError:
+            with session_scope() as db:
+                _log(db, action="profile_confirm", result="unknown_error", detail="Network error before rename.", target_id=target_id, account_id=account_id, job_id=job_id)
+                _mark_account_backoff(db, account_id, 30, "Network error before a username change.")
+            return "unknown_error", "Network error before the username change."
+
+        if profile_status == 200 and profile_has_name(profile, username):
+            _mark_success(target_id, account_id, job_id, profile)
+            return "success", "This account already had the target name, confirmed from its profile."
+
+        try:
+            eligible_status, namechange = await get_name_change(http, token)
+        except httpx.HTTPError:
+            return "unknown_error", "Network error while checking whether the account can rename."
+
+        if eligible_status == 429:
+            with session_scope() as db:
+                _mark_account_backoff(db, account_id, 90, "Rate limited while checking name-change eligibility.")
+                _log(db, action="namechange_check", result="rate_limited", detail="Name-change eligibility was rate limited.", target_id=target_id, account_id=account_id, job_id=job_id, http_status=429)
+            return "rate_limited", "Rate limited while checking name-change eligibility."
+        if eligible_status == 200 and namechange.get("nameChangeAllowed") is False:
+            with session_scope() as db:
+                account = db.get(Account, account_id)
+                if account is not None:
+                    apply_profile(account, profile if profile_status == 200 else {"id": account.mc_uuid, "name": account.mc_name}, namechange)
+                    account.status = "cooldown"
+                _log(db, action="namechange_check", result="cooldown", detail="Account is inside the 30-day rename cooldown.", target_id=target_id, account_id=account_id, job_id=job_id, http_status=200)
+            return "cooldown", "Account is inside the 30-day rename cooldown."
 
     try:
         status, body = await change_name(http, token, username)
@@ -485,7 +560,7 @@ async def monitor_loop(stop: asyncio.Event, http: httpx.AsyncClient) -> None:
             logger.exception("Monitor iteration failed")
             delay = 5.0
         try:
-            await asyncio.wait_for(stop.wait(), timeout=max(0.2, min(5.0, delay)))
+            await asyncio.wait_for(stop.wait(), timeout=max(0.05, min(5.0, delay)))
             return
         except asyncio.TimeoutError:
             continue

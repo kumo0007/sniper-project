@@ -177,7 +177,7 @@ Documented results:
 | 429 | Too many rename requests |
 | 5xx | Service failure |
 
-Wiki.vg also notes a rename endpoint limit on the order of 20 requests a minute, and that repeating 429s can suspend the account's online services. This app allows at most **3 rename requests per minute** across all accounts, at most **3 accounts** in one claim burst, and a **30 second** pause before another burst for the same name. A 429 stops the burst.
+Wiki.vg also notes a rename endpoint limit on the order of 20 requests a minute, and that repeating 429s can suspend the account's online services. For normal targets this app allows at most **3 rename requests per minute** and **3 accounts** in one claim burst. For **3c/OG** targets it raises that to **12 renames/min** and up to **8 accounts** claiming in parallel (still under the ~20/min note), skips pre-claim eligibility RTTs when the account is already rename-ready, and focuses all availability checks on 3c/OG names. A **30 second** pause follows a failed burst. A 429 stops the burst.
 
 A 200 from the rename call is not treated as success by itself. The app then calls `GET /minecraft/profile` and only marks the target successful when that profile's `name` matches. If the confirm request fails, the state stays unknown and a later cycle confirms before sending another rename.
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-from app.config import AVAILABILITY_MIN_GAP_SECONDS
+from app.config import AVAILABILITY_MIN_GAP_SECONDS, HIGH_PRIORITY
 from app.timeutil import as_utc
 
 PRIORITY_WEIGHT = {"3c": 8, "og": 4, "normal": 1}
@@ -38,6 +38,24 @@ def clamp_window_hours(value: int) -> int:
     return value
 
 
+def is_high_priority(target) -> bool:
+    return (getattr(target, "priority", None) or "normal") in HIGH_PRIORITY
+
+
+def focus_high_priority(targets) -> bool:
+    """True when any enabled 3c/OG target should monopolize check bandwidth."""
+    return any(
+        target.enabled and target.state not in BLOCKED_TARGET_STATES and is_high_priority(target)
+        for target in targets
+    )
+
+
+def effective_check_interval(account_count: int, min_gap: int = AVAILABILITY_MIN_GAP_SECONDS) -> float:
+    """Best-case seconds between checks when accounts are staggered."""
+    usable = max(1, account_count)
+    return max(0.5, min_gap / usable)
+
+
 def gap_for_target(target, now: datetime, slow_gap: int, before_hours: int, after_hours: int) -> int:
     hint = as_utc(getattr(target, "release_hint_at", None))
     if hint is None:
@@ -47,6 +65,15 @@ def gap_for_target(target, now: datetime, slow_gap: int, before_hours: int, afte
     if start <= now <= end:
         return 0
     return slow_gap
+
+
+def in_release_window(target, now: datetime, before_hours: int, after_hours: int) -> bool:
+    hint = as_utc(getattr(target, "release_hint_at", None))
+    if hint is None:
+        return False
+    start = hint - timedelta(hours=before_hours)
+    end = hint + timedelta(hours=after_hours)
+    return start <= now <= end
 
 
 def _eligible_target(target, now: datetime, slow_gap: int, before_hours: int, after_hours: int) -> bool:
@@ -65,17 +92,23 @@ def _eligible_target(target, now: datetime, slow_gap: int, before_hours: int, af
 def choose_target(targets, now: datetime, slow_gap: int, before_hours: int, after_hours: int):
     """Pick the next name to check.
 
-    Higher-priority names are checked more often, and a name that was just
-    checked yields to staler names so a 3-character target cannot starve the rest.
+    When any enabled 3c/OG target exists, normal-priority names are skipped so all
+    account bandwidth goes to the race. Higher-priority names still outrank peers.
     """
+    pool = list(targets)
+    if focus_high_priority(pool):
+        pool = [row for row in pool if is_high_priority(row)]
     best = None
     best_score = None
-    for target in targets:
+    for target in pool:
         if not _eligible_target(target, now, slow_gap, before_hours, after_hours):
             continue
         last = as_utc(target.last_checked_at)
         age = 10**9 if last is None else max(0.0, (now - last).total_seconds())
         weight = PRIORITY_WEIGHT.get(target.priority, 1)
+        # Prefer targets inside their release-hint window.
+        if in_release_window(target, now, before_hours, after_hours):
+            weight *= 4
         score = age * weight
         if best is None or score > best_score:
             best = target
@@ -118,19 +151,23 @@ def choose_account(accounts, now: datetime, min_gap: int):
     return best
 
 
-def choose_claim_account(accounts, now: datetime):
-    """An account that is allowed to rename right now. The check gap does not apply."""
-    best = None
-    best_last = None
+def list_claim_accounts(accounts, now: datetime, limit: int) -> list:
+    """Rename-ready accounts, oldest-check first, up to limit."""
+    ready = []
     for account in accounts:
         if not _account_usable(account, now, require_name_change=True):
             continue
         last = as_utc(account.last_availability_check_at)
         sort_last = last or datetime.min.replace(tzinfo=now.tzinfo)
-        if best is None or sort_last < best_last:
-            best = account
-            best_last = sort_last
-    return best
+        ready.append((sort_last, account))
+    ready.sort(key=lambda item: item[0])
+    return [account for _, account in ready[: max(0, limit)]]
+
+
+def choose_claim_account(accounts, now: datetime):
+    """An account that is allowed to rename right now. The check gap does not apply."""
+    rows = list_claim_accounts(accounts, now, 1)
+    return rows[0] if rows else None
 
 
 def soonest_account_wait(accounts, now: datetime, min_gap: int) -> float | None:
@@ -146,3 +183,7 @@ def soonest_account_wait(accounts, now: datetime, min_gap: int) -> float | None:
     if not waits:
         return None
     return min(waits)
+
+
+def count_usable_accounts(accounts, now: datetime) -> int:
+    return sum(1 for account in accounts if _account_usable(account, now, require_name_change=False))

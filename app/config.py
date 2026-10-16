@@ -14,9 +14,13 @@ load_dotenv(ROOT / ".env")
 
 # Stay under the documented 20 availability requests / 5 minutes / account.
 AVAILABILITY_MIN_GAP_SECONDS = 16
+# Normal targets stay conservative. 3c/OG bursts use more of the ~20 rename/min budget.
 CLAIM_MAX_PER_MINUTE = 3
 CLAIM_ACCOUNTS_PER_BURST = 3
+CLAIM_MAX_PER_MINUTE_HOT = 12
+CLAIM_ACCOUNTS_PER_BURST_HOT = 8
 CLAIM_BURST_COOLDOWN_SECONDS = 30
+HIGH_PRIORITY = frozenset({"3c", "og"})
 ACCOUNT_CAP_CEILING = 50
 
 _WEAK_PASSWORDS = {

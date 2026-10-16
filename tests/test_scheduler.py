@@ -9,6 +9,9 @@ from app.services.scheduler import (
     choose_claim_account,
     choose_target,
     clamp_gap_seconds,
+    effective_check_interval,
+    focus_high_priority,
+    list_claim_accounts,
 )
 
 
@@ -65,11 +68,11 @@ def test_three_character_names_are_preferred_when_equally_stale():
     assert chosen.id == 2
 
 
-def test_lower_priority_name_is_not_starved():
+def test_normal_names_are_not_starved_without_3c():
     now = datetime(2026, 10, 7, tzinfo=timezone.utc)
     chosen = choose_target(
         [
-            _target(id=1, priority="3c", last_checked_at=now),
+            _target(id=1, priority="normal", last_checked_at=now),
             _target(id=2, priority="normal", last_checked_at=None),
         ],
         now,
@@ -78,6 +81,37 @@ def test_lower_priority_name_is_not_starved():
         after_hours=6,
     )
     assert chosen.id == 2
+
+
+def test_3c_focus_pauses_normal_targets():
+    now = datetime(2026, 10, 7, tzinfo=timezone.utc)
+    targets = [
+        _target(id=1, priority="3c", last_checked_at=now - timedelta(seconds=1)),
+        _target(id=2, priority="normal", last_checked_at=None),
+    ]
+    assert focus_high_priority(targets) is True
+    chosen = choose_target(targets, now, slow_gap=600, before_hours=2, after_hours=6)
+    assert chosen.id == 1
+
+
+def test_effective_interval_improves_with_more_accounts():
+    assert effective_check_interval(1) == 16
+    assert effective_check_interval(8) == 2.0
+    assert effective_check_interval(16) == 1.0
+
+
+def test_list_claim_accounts_limits_rename_ready():
+    now = datetime(2026, 10, 7, tzinfo=timezone.utc)
+    rows = list_claim_accounts(
+        [
+            _account(id=1, name_change_allowed=True),
+            _account(id=2, name_change_allowed=False),
+            _account(id=3, name_change_allowed=True),
+        ],
+        now,
+        2,
+    )
+    assert [row.id for row in rows] == [1, 3]
 
 
 def test_release_hint_uses_the_slow_gap_outside_the_window():

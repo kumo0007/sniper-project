@@ -18,7 +18,8 @@ A rename is marked successful only after Minecraft's profile endpoint shows that
 ## Limits that are enforced
 
 - One availability check per account every 16 seconds or slower. This stays under the published cap of about 20 checks per 5 minutes per account. The setting cannot go lower.
-- At most 3 username-change requests per minute, and at most 3 accounts in one claim burst.
+- At most 3 username-change requests per minute for normal targets (up to 12/min and 8 parallel accounts for 3c/OG race mode).
+- When a 3c/OG target is enabled, normal targets pause so all accounts focus the race; more accounts = faster staggered checks (still 16s per account).
 - After a burst, that name waits 30 seconds before another burst.
 - Account cap defaults to 25 and cannot be set above 50. There is no proxy support.
 
